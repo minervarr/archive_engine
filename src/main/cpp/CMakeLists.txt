@@ -10,14 +10,19 @@ set(LIBARCHIVE_VERSION "3.7.4")
 set(LIBARCHIVE_URL "https://github.com/libarchive/libarchive/releases/download/v${LIBARCHIVE_VERSION}/libarchive-${LIBARCHIVE_VERSION}.tar.gz")
 set(LIBARCHIVE_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/libarchive-install")
 
+# Normalize Windows backslash paths to forward slashes; otherwise the toolchain
+# path (e.g. C:\...\ndk\...) is parsed by CMake as invalid escape sequences.
+file(TO_CMAKE_PATH "${CMAKE_TOOLCHAIN_FILE}" LIBARCHIVE_TOOLCHAIN_FILE)
+file(TO_CMAKE_PATH "${ANDROID_NDK}" LIBARCHIVE_ANDROID_NDK)
+
 ExternalProject_Add(
     libarchive_ext
     URL               ${LIBARCHIVE_URL}
     CMAKE_ARGS
-        -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+        -DCMAKE_TOOLCHAIN_FILE=${LIBARCHIVE_TOOLCHAIN_FILE}
         -DANDROID_ABI=${ANDROID_ABI}
         -DANDROID_PLATFORM=${ANDROID_PLATFORM}
-        -DANDROID_NDK=${ANDROID_NDK}
+        -DANDROID_NDK=${LIBARCHIVE_ANDROID_NDK}
         -DCMAKE_BUILD_TYPE=Release
         -DCMAKE_INSTALL_PREFIX=${LIBARCHIVE_INSTALL_DIR}
         -DCMAKE_POLICY_DEFAULT_CMP0057=NEW
@@ -62,6 +67,15 @@ add_library(
     SHARED
     archive_jni.cpp
     debug.cpp
+)
+
+# Release-only optimizations: aggressive opt, thin LTO, hidden symbols and
+# dead-code stripping for smaller, faster .so files. Debug stays untouched.
+target_compile_options(archive_engine PRIVATE
+    $<$<CONFIG:Release>:-O3 -flto=thin -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections -fomit-frame-pointer>
+)
+target_link_options(archive_engine PRIVATE
+    $<$<CONFIG:Release>:-flto=thin -Wl,--gc-sections -Wl,--exclude-libs,ALL -Wl,--strip-all>
 )
 
 target_include_directories(archive_engine PRIVATE
