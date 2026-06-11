@@ -6,3 +6,4 @@ local.properties
 .idea/
 *.aar
 *.so
+compile_commands.json
