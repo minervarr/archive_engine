@@ -54,7 +54,6 @@ set_target_properties(libarchive_static PROPERTIES
 )
 
 find_library(z-lib z)
-find_library(log-lib log)
 
 add_library(
     ae_archive
@@ -64,4 +63,8 @@ add_library(
 
 target_include_directories(ae_archive PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(ae_archive PUBLIC cxx_std_17)
-target_link_libraries(ae_archive PUBLIC ae_util libarchive_static ${z-lib} ${log-lib})
+target_link_libraries(ae_archive PUBLIC ae_util libarchive_static ${z-lib})
+if(ANDROID)
+    find_library(log-lib log)
+    target_link_libraries(ae_archive PUBLIC ${log-lib})
+endif()
