@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,7 +30,14 @@ struct DownloadOutcome {
 using ProgressFn = std::function<void(uint64_t downloaded, uint64_t total)>;
 
 // Thin synchronous wrapper over libcurl. One instance is safe to share
-// across threads: each request uses its own curl easy handle.
+// across threads: each request uses its own curl easy handle, but all
+// handles share one CURLSH (DNS cache + TLS session cache + connection
+// pool, set up in the .cc), so back-to-back or concurrent requests to the
+// same host reuse an existing TCP+TLS connection instead of renegotiating
+// one every call. Without this, every single request pays a fresh DNS
+// lookup + TCP handshake + TLS handshake, which is the dominant cost for a
+// small JSON API response and compounds badly under the concurrent bursts
+// QobuzApiService::search_catalog and the download worker pool issue.
 //
 // Transport failures are returned as errors; HTTP error statuses (4xx/5xx)
 // are returned as a normal HttpResponse for get/post_form so callers can
@@ -47,6 +55,11 @@ public:
     };
 
     explicit HttpClient(Options options);
+    ~HttpClient();
+    HttpClient(HttpClient&&) noexcept;
+    HttpClient& operator=(HttpClient&&) noexcept;
+    HttpClient(const HttpClient&) = delete;
+    HttpClient& operator=(const HttpClient&) = delete;
 
     Result<HttpResponse> get(
         const std::string &url,
@@ -71,6 +84,11 @@ public:
 
 private:
     Options options_;
+
+    // Opaque holder for the CURLSH share object + its lock mutexes — kept
+    // out of this header so libcurl types never leak into consumers.
+    struct SharePimpl;
+    std::unique_ptr<SharePimpl> share_;
 };
 
 // True for transient transport failures worth retrying (timeouts,

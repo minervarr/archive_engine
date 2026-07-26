@@ -1,5 +1,6 @@
 #include "ae/http.hh"
 
+#include <array>
 #include <cstdio>
 #include <mutex>
 
@@ -15,6 +16,49 @@ void ensure_curl_global_init() {
     static std::once_flag flag;
     std::call_once(flag, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 }
+
+} // namespace
+
+// CURLSH share object: lets every per-request easy handle (see EasyRequest
+// below) reuse the same DNS cache, TLS session cache, and — the part that
+// actually matters for latency — the same pool of open TCP connections.
+// Without this, curl_easy_cleanup() at the end of every single call tears
+// down that call's connection, so the next call (even a moment later, even
+// to the same host) pays a fresh DNS lookup + TCP handshake + TLS handshake
+// from scratch. CURLSH itself isn't thread-safe unless the caller supplies
+// lock/unlock callbacks (curl's documented requirement), hence the mutex
+// array keyed by curl_lock_data — HttpClient is used concurrently (see
+// QobuzApiService::search_catalog's 4-way std::async fan-out).
+struct HttpClient::SharePimpl {
+    CURLSH *share = nullptr;
+    std::array<std::mutex, CURL_LOCK_DATA_LAST> locks;
+
+    SharePimpl() {
+        ensure_curl_global_init();
+        share = curl_share_init();
+        if (!share) return;
+        curl_share_setopt(share, CURLSHOPT_LOCKFUNC, &SharePimpl::lock_cb);
+        curl_share_setopt(share, CURLSHOPT_UNLOCKFUNC, &SharePimpl::unlock_cb);
+        curl_share_setopt(share, CURLSHOPT_USERDATA, this);
+        curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+        curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+    }
+    ~SharePimpl() {
+        if (share) curl_share_cleanup(share);
+    }
+    SharePimpl(const SharePimpl &) = delete;
+    SharePimpl &operator=(const SharePimpl &) = delete;
+
+    static void lock_cb(CURL *, curl_lock_data data, curl_lock_access, void *userp) {
+        static_cast<SharePimpl *>(userp)->locks[static_cast<size_t>(data)].lock();
+    }
+    static void unlock_cb(CURL *, curl_lock_data data, void *userp) {
+        static_cast<SharePimpl *>(userp)->locks[static_cast<size_t>(data)].unlock();
+    }
+};
+
+namespace {
 
 Error curl_error(CURLcode code, const char *ctx) {
     std::string msg = std::string(ctx) + ": " + curl_easy_strerror(code);
@@ -109,9 +153,14 @@ int download_xferinfo_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
 
 } // namespace
 
-HttpClient::HttpClient(Options options) : options_(std::move(options)) {
+HttpClient::HttpClient(Options options)
+    : options_(std::move(options)), share_(std::make_unique<SharePimpl>()) {
     ensure_curl_global_init();
 }
+
+HttpClient::~HttpClient() = default;
+HttpClient::HttpClient(HttpClient &&) noexcept = default;
+HttpClient &HttpClient::operator=(HttpClient &&) noexcept = default;
 
 std::string HttpClient::url_encode(std::string_view text) {
     ensure_curl_global_init();
@@ -143,13 +192,14 @@ std::string build_url(const std::string &url,
 }
 
 void apply_common_options(EasyRequest &req, const HttpClient::Options &options,
-                          const std::string &url,
+                          CURLSH *share, const std::string &url,
                           const std::vector<std::string> &extra_headers) {
     curl_easy_setopt(req.curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(req.curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(req.curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(req.curl, CURLOPT_ACCEPT_ENCODING, "");
     curl_easy_setopt(req.curl, CURLOPT_CONNECTTIMEOUT_MS, options.connect_timeout_ms);
+    if (share) curl_easy_setopt(req.curl, CURLOPT_SHARE, share);
     if (!options.user_agent.empty()) {
         curl_easy_setopt(req.curl, CURLOPT_USERAGENT, options.user_agent.c_str());
     }
@@ -171,7 +221,7 @@ Result<HttpResponse> HttpClient::get(
     if (!req.curl) return Error{ErrorKind::Network, 0, "curl_easy_init failed"};
 
     std::string full_url = build_url(url, query);
-    apply_common_options(req, options_, full_url, extra_headers);
+    apply_common_options(req, options_, share_->share, full_url, extra_headers);
 
     HttpResponse response;
     curl_easy_setopt(req.curl, CURLOPT_WRITEFUNCTION, append_to_string);
@@ -191,7 +241,7 @@ Result<HttpResponse> HttpClient::post_form(
     EasyRequest req;
     if (!req.curl) return Error{ErrorKind::Network, 0, "curl_easy_init failed"};
 
-    apply_common_options(req, options_, url, extra_headers);
+    apply_common_options(req, options_, share_->share, url, extra_headers);
 
     std::string body;
     bool first = true;
@@ -222,7 +272,7 @@ Result<DownloadOutcome> HttpClient::download_to_file(
     EasyRequest req;
     if (!req.curl) return Error{ErrorKind::Network, 0, "curl_easy_init failed"};
 
-    apply_common_options(req, options_, url, {});
+    apply_common_options(req, options_, share_->share, url, {});
 
     DownloadState state;
     state.path = &path;
