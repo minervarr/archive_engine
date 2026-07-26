@@ -132,15 +132,19 @@ if(ANDROID)
         PRIVATE curl_static mbedtls_static mbedx509_static mbedcrypto_static ${z-lib} ${log-lib}
     )
 else()
-    # Desktop: the consumer must add_subdirectory() (or find_package) a curl
-    # providing CURL::libcurl BEFORE add_subdirectory()'ing this directory —
-    # see streamer's root CMakeLists.txt for the reference setup
-    # (third_party/curl, vendored submodule).
+    # Desktop: prefer a curl the consumer already set up (e.g. streamer's
+    # vendored third_party/curl submodule, add_subdirectory()'d before this
+    # file); fall back to a system install via find_package(), which covers
+    # standalone builds of this repo where nothing else provides curl.
+    if(NOT TARGET CURL::libcurl)
+        find_package(CURL QUIET)
+    endif()
     if(NOT TARGET CURL::libcurl)
         message(FATAL_ERROR
-            "ae_net (desktop): no CURL::libcurl target found. Provide one "
-            "(find_package(CURL) or add_subdirectory a curl build) before "
-            "add_subdirectory()'ing ${CMAKE_CURRENT_SOURCE_DIR}.")
+            "ae_net (desktop): no CURL::libcurl target found and no system "
+            "libcurl was found by find_package(CURL). Provide one "
+            "(add_subdirectory a curl build, or install libcurl dev "
+            "packages) before add_subdirectory()'ing ${CMAKE_CURRENT_SOURCE_DIR}.")
     endif()
     target_link_libraries(ae_net PRIVATE CURL::libcurl)
 endif()
