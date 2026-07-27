@@ -207,20 +207,33 @@ bool seek64(std::FILE *file, uint64_t offset) {
 #endif
 }
 
-// One segment's slice of the file, and where its own writer is up to.
-struct Segment {
-    uint64_t start = 0;
-    uint64_t end   = 0;   // inclusive
-    uint64_t done  = 0;   // bytes already written, so a retry resumes mid-slice
+// Work is handed out in small chunks rather than as one fixed slice per
+// worker. Connection speeds to the same CDN differ enormously — four equal
+// ranges of one file measured 16.7 MB/s, 1.2, 0.9 and 0.5, so the file took as
+// long as the slowest while the other three sat idle having finished their
+// quarter. Pulling from a shared queue means a fast connection simply takes
+// more chunks, and the worst a slow one can hold up the file is one chunk.
+constexpr uint64_t CHUNK_BYTES = 2ull * 1024 * 1024;
+
+struct ChunkQueue {
+    uint64_t total = 0;
+    uint64_t count = 0;
+    std::atomic<uint64_t> next{0};
+
+    // Byte range of chunk `i`, end inclusive.
+    std::pair<uint64_t, uint64_t> range(uint64_t i) const {
+        uint64_t start = i * CHUNK_BYTES;
+        uint64_t end = std::min(start + CHUNK_BYTES, total) - 1;
+        return {start, end};
+    }
 };
 
 struct SegmentState {
-    Segment *segment = nullptr;
     std::FILE *file = nullptr;
     const std::atomic<bool> *cancel = nullptr;
     std::atomic<bool> *failed = nullptr;
-    std::atomic<uint64_t> *downloaded = nullptr;   // shared across segments
-    uint64_t reported = 0;                         // this segment's contribution
+    std::atomic<uint64_t> *downloaded = nullptr;   // shared across workers
+    uint64_t chunk_done = 0;                       // within the current chunk
     bool write_failed = false;
 };
 
@@ -238,7 +251,7 @@ size_t segment_write_cb(char *data, size_t size, size_t nmemb, void *userdata) {
         st->write_failed = true;
         return 0;
     }
-    st->segment->done += len;
+    st->chunk_done += len;
     st->downloaded->fetch_add(len, std::memory_order_relaxed);
     return len;
 }
@@ -383,22 +396,11 @@ Result<HttpResponse> HttpClient::post_form(
 
 namespace {
 
-// Single ranged GET for one segment, resuming from whatever it already wrote.
-// Returns CURLE_OK once the slice is complete.
-CURLcode fetch_segment(const HttpClient::Options &options, CURLSH *share,
-                       const std::string &url, SegmentState &state) {
-    BudgetGuard budget;
-
-    EasyRequest req;
-    if (!req.curl) return CURLE_FAILED_INIT;
-    apply_common_options(req, options, share, url, {});
-
-    // Byte ranges are meaningless against a re-encoded body, and a proxy that
-    // decompresses would desynchronise every offset.
-    curl_easy_setopt(req.curl, CURLOPT_ACCEPT_ENCODING, nullptr);
-
-    std::string range = std::to_string(state.segment->start + state.segment->done) + "-" +
-                        std::to_string(state.segment->end);
+// One ranged GET. `req` is reused across every chunk a worker fetches, so a
+// worker keeps its pooled connection instead of returning it to the CURLSH
+// pool and re-borrowing one every 2 MB.
+CURLcode fetch_range(EasyRequest &req, SegmentState &state, uint64_t from, uint64_t to) {
+    std::string range = std::to_string(from) + "-" + std::to_string(to);
     curl_easy_setopt(req.curl, CURLOPT_RANGE, range.c_str());
     curl_easy_setopt(req.curl, CURLOPT_WRITEFUNCTION, segment_write_cb);
     curl_easy_setopt(req.curl, CURLOPT_WRITEDATA, &state);
@@ -406,7 +408,6 @@ CURLcode fetch_segment(const HttpClient::Options &options, CURLSH *share,
     curl_easy_setopt(req.curl, CURLOPT_XFERINFODATA, &state);
     curl_easy_setopt(req.curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(req.curl, CURLOPT_FAILONERROR, 1L);
-
     return curl_easy_perform(req.curl);
 }
 
@@ -436,10 +437,10 @@ uint64_t HttpClient::probe_ranged_size(const std::string &url) const {
     return parse_content_range_total(headers);
 }
 
-// Fetches [0, total) over `count` concurrent ranges into "<path>.part", then
-// renames it into place. The .part staging is what keeps a failed attempt from
-// leaving a full-size file at the real path, which detect_partial_file() would
-// read as a finished download.
+// Fetches [0, total) into "<path>.part" using up to `count` workers pulling
+// from a shared chunk queue, then renames it into place. The .part staging is
+// what keeps a failed attempt from leaving a full-size file at the real path,
+// which detect_partial_file() would read as a finished download.
 Result<DownloadOutcome> HttpClient::download_segmented(
     const std::string &url, const std::string &path, uint64_t total, int count,
     const ProgressFn &progress, const std::atomic<bool> *cancel) const {
@@ -461,13 +462,12 @@ Result<DownloadOutcome> HttpClient::download_segmented(
         return Error{ErrorKind::Io, 0, "cannot preallocate " + part + ": " + ec.message()};
     }
 
-    std::vector<Segment> segments(static_cast<size_t>(count));
-    uint64_t chunk = total / static_cast<uint64_t>(count);
-    for (int i = 0; i < count; ++i) {
-        segments[static_cast<size_t>(i)].start = chunk * static_cast<uint64_t>(i);
-        segments[static_cast<size_t>(i)].end =
-            (i == count - 1) ? total - 1 : chunk * static_cast<uint64_t>(i + 1) - 1;
-    }
+    ChunkQueue queue;
+    queue.total = total;
+    queue.count = (total + CHUNK_BYTES - 1) / CHUNK_BYTES;
+
+    // No point starting more workers than there are chunks to hand out.
+    count = static_cast<int>(std::min<uint64_t>(static_cast<uint64_t>(count), queue.count));
 
     std::atomic<uint64_t> downloaded{0};
     std::atomic<bool> failed{false};
@@ -495,48 +495,77 @@ Result<DownloadOutcome> HttpClient::download_segmented(
     }
 
     std::vector<std::thread> workers;
-    workers.reserve(segments.size());
-    for (auto &segment : segments) {
-        workers.emplace_back([&, seg = &segment] {
+    workers.reserve(static_cast<size_t>(count));
+    for (int w = 0; w < count; ++w) {
+        workers.emplace_back([&] {
+            // Held for the worker's whole life, not per chunk: re-acquiring
+            // every 2 MB would thrash the semaphore. A worker that cannot get
+            // a slot yet simply starts late and takes whatever chunks are
+            // still outstanding — which is exactly why the queue exists.
+            BudgetGuard budget;
+
             std::FILE *file = std::fopen(part.c_str(), "r+b");
             if (!file) {
                 record_error(Error{ErrorKind::Io, errno, "failed to open " + part});
                 return;
             }
 
+            EasyRequest req;
+            if (!req.curl) {
+                std::fclose(file);
+                record_error(Error{ErrorKind::Network, 0, "curl_easy_init failed"});
+                return;
+            }
+            apply_common_options(req, options_, share_->share, url, {});
+            // Byte ranges are meaningless against a re-encoded body, and a
+            // proxy that decompressed would desynchronise every offset.
+            curl_easy_setopt(req.curl, CURLOPT_ACCEPT_ENCODING, nullptr);
+
             SegmentState state;
-            state.segment = seg;
             state.file = file;
             state.cancel = cancel;
             state.failed = &failed;
             state.downloaded = &downloaded;
 
-            CURLcode code = CURLE_OK;
-            for (uint32_t attempt = 0; attempt <= SEGMENT_RETRIES; ++attempt) {
+            for (;;) {
                 if (segment_should_stop(&state)) break;
-                if (!seek64(file, seg->start + seg->done)) {
-                    record_error(Error{ErrorKind::Io, errno, "seek failed in " + part});
+                uint64_t index = queue.next.fetch_add(1, std::memory_order_relaxed);
+                if (index >= queue.count) break;
+
+                auto [from, to] = queue.range(index);
+                state.chunk_done = 0;
+
+                CURLcode code = CURLE_OK;
+                bool ok = false;
+                for (uint32_t attempt = 0; attempt <= SEGMENT_RETRIES; ++attempt) {
+                    if (segment_should_stop(&state)) break;
+                    if (!seek64(file, from + state.chunk_done)) {
+                        record_error(Error{ErrorKind::Io, errno, "seek failed in " + part});
+                        break;
+                    }
+                    state.write_failed = false;
+                    code = fetch_range(req, state, from + state.chunk_done, to);
+
+                    if (state.write_failed) {
+                        record_error(Error{ErrorKind::Io, errno, "short write to " + part});
+                        break;
+                    }
+                    // Retries resume inside the chunk, so a flaky link costs
+                    // at most the bytes of one chunk still outstanding.
+                    if (code == CURLE_OK && state.chunk_done >= (to - from + 1)) {
+                        ok = true;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    if (!segment_should_stop(&state)) {
+                        record_error(curl_error(code, "chunk download failed"));
+                    }
                     break;
                 }
-                state.write_failed = false;
-                code = fetch_segment(options_, share_->share, url, state);
-
-                if (state.write_failed) {
-                    record_error(Error{ErrorKind::Io, errno, "short write to " + part});
-                    break;
-                }
-                if (code == CURLE_OK && seg->done >= (seg->end - seg->start + 1)) break;
-                if (segment_should_stop(&state)) break;
-
-                // Retry the remainder of this slice only — a flaky link costs
-                // one segment's progress, not the whole file's.
-                if (attempt == SEGMENT_RETRIES) {
-                    record_error(curl_error(code, "segment download failed"));
-                }
+                if (progress && aggregate) aggregate(0, 0);
             }
             std::fclose(file);
-
-            if (progress && aggregate) aggregate(0, 0);
         });
     }
     for (auto &worker : workers) worker.join();
