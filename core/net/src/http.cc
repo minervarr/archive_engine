@@ -1,8 +1,14 @@
 #include "ae/http.hh"
 
+#include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 #include <curl/curl.h>
 
@@ -16,6 +22,44 @@ void ensure_curl_global_init() {
     static std::once_flag flag;
     std::call_once(flag, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 }
+
+// Process-wide cap on simultaneous transfer connections. Track concurrency and
+// per-file segmenting multiply — 8 concurrent tracks at 4 segments each would
+// be 32 sockets, a number neither setting implies on its own — so both go
+// through this gate.
+class ConnectionBudget {
+public:
+    static ConnectionBudget &instance() {
+        static ConnectionBudget budget;
+        return budget;
+    }
+
+    void acquire() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return in_flight_ < limit_; });
+        ++in_flight_;
+    }
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --in_flight_;
+        }
+        cv_.notify_one();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    int in_flight_ = 0;
+    int limit_ = 16;
+};
+
+struct BudgetGuard {
+    BudgetGuard() { ConnectionBudget::instance().acquire(); }
+    ~BudgetGuard() { ConnectionBudget::instance().release(); }
+    BudgetGuard(const BudgetGuard &) = delete;
+    BudgetGuard &operator=(const BudgetGuard &) = delete;
+};
 
 } // namespace
 
@@ -151,6 +195,77 @@ int download_xferinfo_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
     return 0;
 }
 
+// ── Segmented download ──────────────────────────────────────────────────────
+
+constexpr uint32_t SEGMENT_RETRIES = 3;
+
+bool seek64(std::FILE *file, uint64_t offset) {
+#ifdef _WIN32
+    return _fseeki64(file, static_cast<__int64>(offset), SEEK_SET) == 0;
+#else
+    return fseeko(file, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
+}
+
+// One segment's slice of the file, and where its own writer is up to.
+struct Segment {
+    uint64_t start = 0;
+    uint64_t end   = 0;   // inclusive
+    uint64_t done  = 0;   // bytes already written, so a retry resumes mid-slice
+};
+
+struct SegmentState {
+    Segment *segment = nullptr;
+    std::FILE *file = nullptr;
+    const std::atomic<bool> *cancel = nullptr;
+    std::atomic<bool> *failed = nullptr;
+    std::atomic<uint64_t> *downloaded = nullptr;   // shared across segments
+    uint64_t reported = 0;                         // this segment's contribution
+    bool write_failed = false;
+};
+
+bool segment_should_stop(const SegmentState *st) {
+    return (st->cancel && st->cancel->load(std::memory_order_relaxed)) ||
+           st->failed->load(std::memory_order_relaxed);
+}
+
+size_t segment_write_cb(char *data, size_t size, size_t nmemb, void *userdata) {
+    auto *st = static_cast<SegmentState *>(userdata);
+    size_t len = size * nmemb;
+    if (segment_should_stop(st)) return 0;
+
+    if (std::fwrite(data, 1, len, st->file) != len) {
+        st->write_failed = true;
+        return 0;
+    }
+    st->segment->done += len;
+    st->downloaded->fetch_add(len, std::memory_order_relaxed);
+    return len;
+}
+
+int segment_xferinfo_cb(void *userdata, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return segment_should_stop(static_cast<SegmentState *>(userdata)) ? 1 : 0;
+}
+
+// Reads "Content-Range: bytes 0-0/12345" from a probe response. Returns 0 when
+// the header is absent or unparseable, which is the caller's signal that the
+// server will not be segmented.
+uint64_t parse_content_range_total(const std::string &headers) {
+    std::string lower = headers;
+    for (char &c : lower) c = static_cast<char>(std::tolower((unsigned char)c));
+    size_t at = lower.find("content-range:");
+    if (at == std::string::npos) return 0;
+    size_t slash = headers.find('/', at);
+    if (slash == std::string::npos) return 0;
+    uint64_t total = 0;
+    for (size_t i = slash + 1; i < headers.size(); ++i) {
+        char c = headers[i];
+        if (c < '0' || c > '9') break;
+        total = total * 10 + static_cast<uint64_t>(c - '0');
+    }
+    return total;
+}
+
 } // namespace
 
 HttpClient::HttpClient(Options options)
@@ -266,9 +381,205 @@ Result<HttpResponse> HttpClient::post_form(
     return response;
 }
 
+namespace {
+
+// Single ranged GET for one segment, resuming from whatever it already wrote.
+// Returns CURLE_OK once the slice is complete.
+CURLcode fetch_segment(const HttpClient::Options &options, CURLSH *share,
+                       const std::string &url, SegmentState &state) {
+    BudgetGuard budget;
+
+    EasyRequest req;
+    if (!req.curl) return CURLE_FAILED_INIT;
+    apply_common_options(req, options, share, url, {});
+
+    // Byte ranges are meaningless against a re-encoded body, and a proxy that
+    // decompresses would desynchronise every offset.
+    curl_easy_setopt(req.curl, CURLOPT_ACCEPT_ENCODING, nullptr);
+
+    std::string range = std::to_string(state.segment->start + state.segment->done) + "-" +
+                        std::to_string(state.segment->end);
+    curl_easy_setopt(req.curl, CURLOPT_RANGE, range.c_str());
+    curl_easy_setopt(req.curl, CURLOPT_WRITEFUNCTION, segment_write_cb);
+    curl_easy_setopt(req.curl, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(req.curl, CURLOPT_XFERINFOFUNCTION, segment_xferinfo_cb);
+    curl_easy_setopt(req.curl, CURLOPT_XFERINFODATA, &state);
+    curl_easy_setopt(req.curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(req.curl, CURLOPT_FAILONERROR, 1L);
+
+    return curl_easy_perform(req.curl);
+}
+
+} // namespace
+
+// Probe with "Range: 0-0": one request establishes both that the server honours
+// ranges (206) and the total size (from Content-Range). Returns 0 when the file
+// must not be segmented.
+uint64_t HttpClient::probe_ranged_size(const std::string &url) const {
+    EasyRequest req;
+    if (!req.curl) return 0;
+    apply_common_options(req, options_, share_->share, url, {});
+    curl_easy_setopt(req.curl, CURLOPT_ACCEPT_ENCODING, nullptr);
+    curl_easy_setopt(req.curl, CURLOPT_RANGE, "0-0");
+
+    std::string headers, body;
+    curl_easy_setopt(req.curl, CURLOPT_HEADERFUNCTION, append_to_string);
+    curl_easy_setopt(req.curl, CURLOPT_HEADERDATA, &headers);
+    curl_easy_setopt(req.curl, CURLOPT_WRITEFUNCTION, append_to_string);
+    curl_easy_setopt(req.curl, CURLOPT_WRITEDATA, &body);
+
+    if (curl_easy_perform(req.curl) != CURLE_OK) return 0;
+
+    long status = 0;
+    curl_easy_getinfo(req.curl, CURLINFO_RESPONSE_CODE, &status);
+    if (status != 206) return 0;   // 200 means the range was ignored
+    return parse_content_range_total(headers);
+}
+
+// Fetches [0, total) over `count` concurrent ranges into "<path>.part", then
+// renames it into place. The .part staging is what keeps a failed attempt from
+// leaving a full-size file at the real path, which detect_partial_file() would
+// read as a finished download.
+Result<DownloadOutcome> HttpClient::download_segmented(
+    const std::string &url, const std::string &path, uint64_t total, int count,
+    const ProgressFn &progress, const std::atomic<bool> *cancel) const {
+    namespace fs = std::filesystem;
+    std::string part = path + ".part";
+    std::error_code ec;
+    fs::remove(fs::u8path(part), ec);
+
+    {
+        std::FILE *create = std::fopen(part.c_str(), "wb");
+        if (!create) {
+            return Error{ErrorKind::Io, errno, "failed to create " + part};
+        }
+        std::fclose(create);
+    }
+    fs::resize_file(fs::u8path(part), total, ec);
+    if (ec) {
+        fs::remove(fs::u8path(part), ec);
+        return Error{ErrorKind::Io, 0, "cannot preallocate " + part + ": " + ec.message()};
+    }
+
+    std::vector<Segment> segments(static_cast<size_t>(count));
+    uint64_t chunk = total / static_cast<uint64_t>(count);
+    for (int i = 0; i < count; ++i) {
+        segments[static_cast<size_t>(i)].start = chunk * static_cast<uint64_t>(i);
+        segments[static_cast<size_t>(i)].end =
+            (i == count - 1) ? total - 1 : chunk * static_cast<uint64_t>(i + 1) - 1;
+    }
+
+    std::atomic<uint64_t> downloaded{0};
+    std::atomic<bool> failed{false};
+    std::mutex error_mutex;
+    Error first_error{};
+    bool have_error = false;
+
+    auto record_error = [&](Error e) {
+        std::lock_guard<std::mutex> lock(error_mutex);
+        if (!have_error) {
+            first_error = std::move(e);
+            have_error = true;
+        }
+        failed.store(true, std::memory_order_relaxed);
+    };
+
+    // A progress pump on the calling thread would need its own thread; instead
+    // each segment's write callback bumps the shared counter and the segment
+    // that happens to be writing reports the aggregate.
+    ProgressFn aggregate;
+    if (progress) {
+        aggregate = [&](uint64_t, uint64_t) {
+            progress(downloaded.load(std::memory_order_relaxed), total);
+        };
+    }
+
+    std::vector<std::thread> workers;
+    workers.reserve(segments.size());
+    for (auto &segment : segments) {
+        workers.emplace_back([&, seg = &segment] {
+            std::FILE *file = std::fopen(part.c_str(), "r+b");
+            if (!file) {
+                record_error(Error{ErrorKind::Io, errno, "failed to open " + part});
+                return;
+            }
+
+            SegmentState state;
+            state.segment = seg;
+            state.file = file;
+            state.cancel = cancel;
+            state.failed = &failed;
+            state.downloaded = &downloaded;
+
+            CURLcode code = CURLE_OK;
+            for (uint32_t attempt = 0; attempt <= SEGMENT_RETRIES; ++attempt) {
+                if (segment_should_stop(&state)) break;
+                if (!seek64(file, seg->start + seg->done)) {
+                    record_error(Error{ErrorKind::Io, errno, "seek failed in " + part});
+                    break;
+                }
+                state.write_failed = false;
+                code = fetch_segment(options_, share_->share, url, state);
+
+                if (state.write_failed) {
+                    record_error(Error{ErrorKind::Io, errno, "short write to " + part});
+                    break;
+                }
+                if (code == CURLE_OK && seg->done >= (seg->end - seg->start + 1)) break;
+                if (segment_should_stop(&state)) break;
+
+                // Retry the remainder of this slice only — a flaky link costs
+                // one segment's progress, not the whole file's.
+                if (attempt == SEGMENT_RETRIES) {
+                    record_error(curl_error(code, "segment download failed"));
+                }
+            }
+            std::fclose(file);
+
+            if (progress && aggregate) aggregate(0, 0);
+        });
+    }
+    for (auto &worker : workers) worker.join();
+
+    bool canceled = cancel && cancel->load(std::memory_order_relaxed);
+    uint64_t written = downloaded.load(std::memory_order_relaxed);
+
+    if (canceled || have_error || written != total) {
+        fs::remove(fs::u8path(part), ec);
+        if (canceled) return Error{ErrorKind::Canceled, 0, "download canceled"};
+        if (have_error) return first_error;
+        return Error{ErrorKind::Network, 0,
+                     "segmented download wrote " + std::to_string(written) + " of " +
+                         std::to_string(total) + " bytes"};
+    }
+
+    fs::rename(fs::u8path(part), fs::u8path(path), ec);
+    if (ec) {
+        fs::remove(fs::u8path(part), ec);
+        return Error{ErrorKind::Io, 0, "cannot rename " + part + ": " + ec.message()};
+    }
+    return DownloadOutcome{false, written};
+}
+
 Result<DownloadOutcome> HttpClient::download_to_file(
     const std::string &url, const std::string &path, uint64_t resume_offset,
     const ProgressFn &progress, const std::atomic<bool> *cancel) const {
+    // Resume keeps the single-stream path: its contract is a Range from an
+    // existing partial at the real path, which segmenting cannot honour.
+    if (options_.max_segments > 1 && resume_offset == 0) {
+        uint64_t total = probe_ranged_size(url);
+        if (total >= options_.min_segment_bytes) {
+            uint64_t by_size = total / options_.min_segment_bytes;
+            int count = static_cast<int>(
+                std::min<uint64_t>(by_size, static_cast<uint64_t>(options_.max_segments)));
+            if (count > 1) {
+                return download_segmented(url, path, total, count, progress, cancel);
+            }
+        }
+    }
+
+    BudgetGuard budget;
+
     EasyRequest req;
     if (!req.curl) return Error{ErrorKind::Network, 0, "curl_easy_init failed"};
 

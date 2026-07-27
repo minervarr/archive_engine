@@ -52,6 +52,16 @@ public:
         // libcurl cannot see the system trust store.
         std::string ca_bundle_path;
         long connect_timeout_ms = 10000;
+
+        // Byte-range connections download_to_file may open per file. CDNs
+        // commonly throttle per connection rather than per client — Qobuz's
+        // serves a cold file at ~650 KB/s on one connection but ~3.4 MB/s
+        // across four ranges of that same file — so splitting a large file is
+        // worth roughly 5x. 1 disables segmenting entirely.
+        int max_segments = 1;
+        // Files smaller than this are fetched in one piece: the extra probe
+        // and connection setup costs more than the parallelism buys.
+        uint64_t min_segment_bytes = 4ull * 1024 * 1024;
     };
 
     explicit HttpClient(Options options);
@@ -75,6 +85,12 @@ public:
     // sent; the file is appended on 206 and truncated/rewritten on 200.
     // `progress` and `cancel` may be null. Cancellation yields
     // ErrorKind::Canceled; HTTP >= 400 yields ErrorKind::Http.
+    //
+    // When Options::max_segments > 1, the server supports ranges, the size is
+    // known and large enough, and no resume was requested, the body is fetched
+    // over several range connections at once into "<path>.part" and renamed
+    // into place only once every segment is complete. Everything else takes
+    // the single-stream path unchanged.
     Result<DownloadOutcome> download_to_file(
         const std::string &url, const std::string &path,
         uint64_t resume_offset = 0, const ProgressFn &progress = nullptr,
@@ -83,6 +99,14 @@ public:
     static std::string url_encode(std::string_view text);
 
 private:
+    // Returns the total size when the server honours ranges, 0 when the body
+    // must be fetched in one piece.
+    uint64_t probe_ranged_size(const std::string &url) const;
+    Result<DownloadOutcome> download_segmented(const std::string &url,
+                                               const std::string &path, uint64_t total,
+                                               int count, const ProgressFn &progress,
+                                               const std::atomic<bool> *cancel) const;
+
     Options options_;
 
     // Opaque holder for the CURLSH share object + its lock mutexes — kept
