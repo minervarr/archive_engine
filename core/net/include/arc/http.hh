@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "ae/result.hh"
+#include "arc/result.hh"
 
-namespace ae {
+namespace arc {
 
 struct HttpResponse {
     long status = 0;
@@ -119,4 +119,4 @@ private:
 // connection resets, etc.).
 bool is_retryable_network_error(const Error &error);
 
-} // namespace ae
+} // namespace arc

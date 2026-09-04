@@ -1,4 +1,4 @@
-#include "ae/http.hh"
+#include "arc/http.hh"
 
 #include <algorithm>
 #include <array>
@@ -12,9 +12,9 @@
 
 #include <curl/curl.h>
 
-#include "ae/log.hh"
+#include "arc/log.hh"
 
-namespace ae {
+namespace arc {
 
 namespace {
 
@@ -106,7 +106,7 @@ namespace {
 
 Error curl_error(CURLcode code, const char *ctx) {
     std::string msg = std::string(ctx) + ": " + curl_easy_strerror(code);
-    AE_LOGE("%s", msg.c_str());
+    ARC_LOGE("%s", msg.c_str());
     ErrorKind kind =
         (code == CURLE_ABORTED_BY_CALLBACK) ? ErrorKind::Canceled : ErrorKind::Network;
     return Error{kind, static_cast<int>(code), std::move(msg)};
@@ -670,4 +670,4 @@ bool is_retryable_network_error(const Error &error) {
     }
 }
 
-} // namespace ae
+} // namespace arc

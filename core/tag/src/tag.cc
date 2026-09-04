@@ -1,4 +1,4 @@
-#include "ae/tag.hh"
+#include "arc/tag.hh"
 
 #include <chrono>
 #include <thread>
@@ -8,14 +8,14 @@
 #include <taglib/tpropertymap.h>
 #include <taglib/tvariant.h>
 
-#include "ae/log.hh"
+#include "arc/log.hh"
 
-namespace ae {
+namespace arc {
 
 namespace {
 
 Error tag_error(std::string message) {
-    AE_LOGE("%s", message.c_str());
+    ARC_LOGE("%s", message.c_str());
     return Error{ErrorKind::Tagging, 0, std::move(message)};
 }
 
@@ -52,11 +52,11 @@ Result<void> write_tags(const std::string &path, const TagData &tags) {
     for (int attempt = 0; attempt < 3; ++attempt) {
         if (file.save()) return {};
         if (attempt < 2) {
-            AE_LOGD("tag save failed for %s, retrying (attempt %d)", path.c_str(), attempt + 1);
+            ARC_LOGD("tag save failed for %s, retrying (attempt %d)", path.c_str(), attempt + 1);
             std::this_thread::sleep_for(std::chrono::milliseconds(250 * (attempt + 1)));
         }
     }
     return tag_error("failed to save tags after 3 attempts: " + path);
 }
 
-} // namespace ae
+} // namespace arc

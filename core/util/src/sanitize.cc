@@ -1,6 +1,6 @@
-#include "ae/sanitize.hh"
+#include "arc/sanitize.hh"
 
-namespace ae {
+namespace arc {
 
 namespace {
 
@@ -51,4 +51,4 @@ std::string sanitize_filename(std::string_view name) {
     return std::string(trimmed);
 }
 
-} // namespace ae
+} // namespace arc

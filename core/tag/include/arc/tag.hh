@@ -6,9 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "ae/result.hh"
+#include "arc/result.hh"
 
-namespace ae {
+namespace arc {
 
 struct CoverArt {
     std::string mime_type; // e.g. "image/jpeg"
@@ -33,4 +33,4 @@ struct TagData {
 // retried 3x with 250ms/500ms backoff to ride out transient I/O failures.
 Result<void> write_tags(const std::string &path, const TagData &tags);
 
-} // namespace ae
+} // namespace arc

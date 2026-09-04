@@ -1,8 +1,8 @@
-#include "ae/hash.hh"
+#include "arc/hash.hh"
 
 #include <cstring>
 
-namespace ae {
+namespace arc {
 
 std::string to_hex(const std::uint8_t *bytes, std::size_t len) {
     static const char kHexChars[] = "0123456789abcdef";
@@ -117,4 +117,4 @@ std::string md5_hex(std::string_view input) {
     return to_hex(digest.data(), digest.size());
 }
 
-} // namespace ae
+} // namespace arc

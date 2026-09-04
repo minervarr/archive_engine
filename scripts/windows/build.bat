@@ -9,5 +9,5 @@ cmake -S core -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
 echo.
-echo Done: build\ (ae_util, ae_archive)
+echo Done: build\ (arc_util, arc_fs, arc_archive)
 endlocal

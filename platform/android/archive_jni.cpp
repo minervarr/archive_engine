@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 
-#include "ae/archive.hh"
+#include "arc/archive.hh"
 #include "debug.h"
 
 static std::string jstr(JNIEnv *env, jstring js) {
@@ -27,8 +27,8 @@ Java_io_nava_archive_1engine_ArchiveEngine_extract(
         JNIEnv *env, jclass,
         jstring jArchivePath, jstring jDestDir) {
 
-    AE_TRACE("extract");
-    auto result = ae::archive_extract(jstr(env, jArchivePath), jstr(env, jDestDir));
+    ARC_TRACE("extract");
+    auto result = arc::archive_extract(jstr(env, jArchivePath), jstr(env, jDestDir));
     if (!result.ok()) {
         g_last_error = result.error().message;
         return JNI_FALSE;
@@ -41,7 +41,7 @@ Java_io_nava_archive_1engine_ArchiveEngine_compress(
         JNIEnv *env, jclass,
         jobjectArray jSrcPaths, jstring jDestPath, jstring jFormat) {
 
-    AE_TRACE("compress");
+    ARC_TRACE("compress");
     jsize count = env->GetArrayLength(jSrcPaths);
     std::vector<std::string> src_paths;
     src_paths.reserve(count);
@@ -52,10 +52,10 @@ Java_io_nava_archive_1engine_ArchiveEngine_compress(
     }
 
     std::string format = jstr(env, jFormat);
-    ae::ArchiveFormat fmt =
-        (format == "zip") ? ae::ArchiveFormat::Zip : ae::ArchiveFormat::TarGz;
+    arc::ArchiveFormat fmt =
+        (format == "zip") ? arc::ArchiveFormat::Zip : arc::ArchiveFormat::TarGz;
 
-    auto result = ae::archive_compress(src_paths, jstr(env, jDestPath), fmt);
+    auto result = arc::archive_compress(src_paths, jstr(env, jDestPath), fmt);
     if (!result.ok()) {
         g_last_error = result.error().message;
         return JNI_FALSE;

@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-namespace ae {
+namespace arc {
 
 // Standard base64 (RFC 4648) with '=' padding.
 std::string base64_encode(std::string_view input);
@@ -13,4 +13,4 @@ std::string base64_encode(std::string_view input);
 // Returns std::nullopt on invalid input.
 std::optional<std::string> base64_decode(std::string_view input);
 
-} // namespace ae
+} // namespace arc

@@ -3,9 +3,9 @@
 #include <string>
 #include <vector>
 
-#include "ae/result.hh"
+#include "arc/result.hh"
 
-namespace ae {
+namespace arc {
 
 // Output container format for compression.
 enum class ArchiveFormat {
@@ -21,4 +21,4 @@ Result<void> archive_extract(const std::string &archive_path, const std::string 
 Result<void> archive_compress(const std::vector<std::string> &src_paths,
                               const std::string &dest_path, ArchiveFormat format);
 
-} // namespace ae
+} // namespace arc

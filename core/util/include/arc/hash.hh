@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-namespace ae {
+namespace arc {
 
 // Converts bytes to a lowercase hexadecimal string.
 std::string to_hex(const std::uint8_t *bytes, std::size_t len);
@@ -17,4 +17,4 @@ std::array<std::uint8_t, 16> md5(std::string_view input);
 // Convenience: lowercase hex string of the MD5 digest.
 std::string md5_hex(std::string_view input);
 
-} // namespace ae
+} // namespace arc

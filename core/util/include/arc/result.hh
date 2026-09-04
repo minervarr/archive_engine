@@ -5,7 +5,7 @@
 #include <string>
 #include <utility>
 
-namespace ae {
+namespace arc {
 
 // Error categories shared across engine modules. `code` carries the
 // module-specific raw value (e.g. a CURLcode or an HTTP status).
@@ -76,4 +76,4 @@ private:
     std::optional<Error> error_;
 };
 
-} // namespace ae
+} // namespace arc

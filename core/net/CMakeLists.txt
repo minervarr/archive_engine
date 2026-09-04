@@ -1,14 +1,14 @@
-# ae_net — curl-based HTTP/download module. The source (src/http.cc) is
+# arc_net — curl-based HTTP/download module. The source (src/http.cc) is
 # fully portable; what differs per platform is where libcurl comes from.
 #   Android: no system curl/TLS — cross-compiled here via ExternalProject_Add.
 #   Desktop: the consumer already has a curl (e.g. streamer's vendored
 #            third_party/curl submodule) — reuse its CURL::libcurl target
 #            instead of fetching/building a second copy.
 
-add_library(ae_net STATIC src/http.cc)
-target_include_directories(ae_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_features(ae_net PUBLIC cxx_std_17)
-target_link_libraries(ae_net PUBLIC ae_util)
+add_library(arc_net STATIC src/http.cc)
+target_include_directories(arc_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(arc_net PUBLIC cxx_std_17)
+target_link_libraries(arc_net PUBLIC arc_util)
 
 if(ANDROID)
     include(ExternalProject)
@@ -16,8 +16,8 @@ if(ANDROID)
     # Normalize Windows backslash paths to forward slashes; otherwise the
     # toolchain path (e.g. C:\...\ndk\...) is parsed by CMake as invalid
     # escape sequences.
-    file(TO_CMAKE_PATH "${CMAKE_TOOLCHAIN_FILE}" AE_NET_TOOLCHAIN_FILE)
-    file(TO_CMAKE_PATH "${ANDROID_NDK}" AE_NET_ANDROID_NDK)
+    file(TO_CMAKE_PATH "${CMAKE_TOOLCHAIN_FILE}" ARC_NET_TOOLCHAIN_FILE)
+    file(TO_CMAKE_PATH "${ANDROID_NDK}" ARC_NET_ANDROID_NDK)
 
     # --- mbedTLS (TLS backend for curl; far simpler to cross-compile than OpenSSL)
 
@@ -29,10 +29,10 @@ if(ANDROID)
         mbedtls_ext
         URL               ${MBEDTLS_URL}
         CMAKE_ARGS
-            -DCMAKE_TOOLCHAIN_FILE=${AE_NET_TOOLCHAIN_FILE}
+            -DCMAKE_TOOLCHAIN_FILE=${ARC_NET_TOOLCHAIN_FILE}
             -DANDROID_ABI=${ANDROID_ABI}
             -DANDROID_PLATFORM=${ANDROID_PLATFORM}
-            -DANDROID_NDK=${AE_NET_ANDROID_NDK}
+            -DANDROID_NDK=${ARC_NET_ANDROID_NDK}
             -DCMAKE_BUILD_TYPE=Release
             -DCMAKE_INSTALL_PREFIX=${MBEDTLS_INSTALL_DIR}
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -71,10 +71,10 @@ if(ANDROID)
         URL               ${CURL_URL}
         DEPENDS           mbedtls_ext
         CMAKE_ARGS
-            -DCMAKE_TOOLCHAIN_FILE=${AE_NET_TOOLCHAIN_FILE}
+            -DCMAKE_TOOLCHAIN_FILE=${ARC_NET_TOOLCHAIN_FILE}
             -DANDROID_ABI=${ANDROID_ABI}
             -DANDROID_PLATFORM=${ANDROID_PLATFORM}
-            -DANDROID_NDK=${AE_NET_ANDROID_NDK}
+            -DANDROID_NDK=${ARC_NET_ANDROID_NDK}
             -DCMAKE_BUILD_TYPE=Release
             -DCMAKE_INSTALL_PREFIX=${CURL_INSTALL_DIR}
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -128,7 +128,7 @@ if(ANDROID)
 
     find_library(z-lib z)
     find_library(log-lib log)
-    target_link_libraries(ae_net
+    target_link_libraries(arc_net
         PRIVATE curl_static mbedtls_static mbedx509_static mbedcrypto_static ${z-lib} ${log-lib}
     )
 else()
@@ -141,10 +141,10 @@ else()
     endif()
     if(NOT TARGET CURL::libcurl)
         message(FATAL_ERROR
-            "ae_net (desktop): no CURL::libcurl target found and no system "
+            "arc_net (desktop): no CURL::libcurl target found and no system "
             "libcurl was found by find_package(CURL). Provide one "
             "(add_subdirectory a curl build, or install libcurl dev "
             "packages) before add_subdirectory()'ing ${CMAKE_CURRENT_SOURCE_DIR}.")
     endif()
-    target_link_libraries(ae_net PRIVATE CURL::libcurl)
+    target_link_libraries(arc_net PRIVATE CURL::libcurl)
 endif()

@@ -3,7 +3,7 @@
 #include <string>
 #include <string_view>
 
-namespace ae {
+namespace arc {
 
 // Sanitizes a string for use as a file or directory name.
 //
@@ -13,4 +13,4 @@ namespace ae {
 // bytes are ever replaced.
 std::string sanitize_filename(std::string_view name);
 
-} // namespace ae
+} // namespace arc

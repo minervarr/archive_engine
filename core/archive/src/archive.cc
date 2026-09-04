@@ -1,4 +1,4 @@
-#include "ae/archive.hh"
+#include "arc/archive.hh"
 
 #include <cerrno>
 #include <cstdio>
@@ -6,15 +6,15 @@
 #include <archive.h>
 #include <archive_entry.h>
 
-#include "ae/log.hh"
+#include "arc/log.hh"
 
-namespace ae {
+namespace arc {
 
 namespace {
 
 Error archive_err(ErrorKind kind, const char *ctx, const char *detail) {
     std::string msg = std::string(ctx) + ": " + (detail ? detail : "unknown");
-    AE_LOGE("%s", msg.c_str());
+    ARC_LOGE("%s", msg.c_str());
     return Error{kind, 0, std::move(msg)};
 }
 
@@ -35,7 +35,7 @@ int copy_data(archive *src, archive *dst) {
 } // namespace
 
 Result<void> archive_extract(const std::string &archive_path, const std::string &dest_dir) {
-    AE_LOGI("extract src=%s dest=%s", archive_path.c_str(), dest_dir.c_str());
+    ARC_LOGI("extract src=%s dest=%s", archive_path.c_str(), dest_dir.c_str());
 
     archive *a = archive_read_new();
     archive_read_support_filter_all(a);
@@ -71,13 +71,13 @@ Result<void> archive_extract(const std::string &archive_path, const std::string 
 
     archive_read_free(a);
     archive_write_free(out);
-    if (result.ok()) AE_LOGI("extract done");
+    if (result.ok()) ARC_LOGI("extract done");
     return result;
 }
 
 Result<void> archive_compress(const std::vector<std::string> &src_paths,
                               const std::string &dest_path, ArchiveFormat format) {
-    AE_LOGI("compress dest=%s", dest_path.c_str());
+    ARC_LOGI("compress dest=%s", dest_path.c_str());
 
     archive *a = archive_write_new();
     if (format == ArchiveFormat::Zip) {
@@ -128,7 +128,7 @@ Result<void> archive_compress(const std::vector<std::string> &src_paths,
                         }
                         std::fclose(f);
                     } else {
-                        AE_LOGW("fopen failed for %s errno=%d", path, errno);
+                        ARC_LOGW("fopen failed for %s errno=%d", path, errno);
                     }
                 }
             }
@@ -140,8 +140,8 @@ Result<void> archive_compress(const std::vector<std::string> &src_paths,
 
     archive_write_close(a);
     archive_write_free(a);
-    if (result.ok()) AE_LOGI("compress done dest=%s", dest_path.c_str());
+    if (result.ok()) ARC_LOGI("compress done dest=%s", dest_path.c_str());
     return result;
 }
 
-} // namespace ae
+} // namespace arc

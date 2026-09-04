@@ -1,10 +1,10 @@
-#include "ae/base64.hh"
+#include "arc/base64.hh"
 
 #include <array>
 #include <cctype>
 #include <cstdint>
 
-namespace ae {
+namespace arc {
 
 namespace {
 
@@ -79,4 +79,4 @@ std::optional<std::string> base64_decode(std::string_view input) {
     return out;
 }
 
-} // namespace ae
+} // namespace arc

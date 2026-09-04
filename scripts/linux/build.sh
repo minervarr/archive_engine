@@ -18,7 +18,7 @@ cmake -S "$root/core" -B "$build" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$build" -j"$(nproc)"
 
 echo
-echo "Done: $build (ae_util, ae_archive)"
-echo "Pass -DAE_BUILD_NET=ON/-DAE_BUILD_TAG=ON only if CURL::libcurl / a 'tag'"
+echo "Done: $build (arc_util, arc_fs, arc_archive)"
+echo "Pass -DARC_BUILD_NET=ON/-DARC_BUILD_TAG=ON only if CURL::libcurl / a 'tag'"
 echo "target are already in scope (they are not, standalone) — see core/net"
 echo "and core/tag CMakeLists.txt for what a desktop consumer must provide."
