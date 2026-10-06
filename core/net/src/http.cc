@@ -152,6 +152,13 @@ struct DownloadState {
     bool open_failed = false;
 };
 
+// 64 KiB. The default stdio buffer is a few kilobytes, and a FLAC is tens of
+// megabytes, so the small one turns into thousands of write syscalls. One
+// buffer per open file; setvbuf allocates it and fclose frees it.
+void enlarge_stdio_buffer(std::FILE *f) {
+    if (f) std::setvbuf(f, nullptr, _IOFBF, 64 * 1024);
+}
+
 // Opens the output file lazily on the first body chunk, once the status is
 // known: append after a 206 (server honored the Range), truncate on a 200
 // (full re-download even if a resume was requested).
@@ -166,6 +173,7 @@ size_t download_write_cb(char *data, size_t size, size_t nmemb, void *userdata) 
         curl_easy_getinfo(st->curl, CURLINFO_RESPONSE_CODE, &status);
         st->resumed = (status == 206);
         st->file = std::fopen(st->path->c_str(), st->resumed ? "ab" : "wb");
+        enlarge_stdio_buffer(st->file);
         if (!st->file) {
             st->open_error = Error{ErrorKind::Io, errno,
                                    "failed to open " + *st->path + " for writing"};
@@ -505,6 +513,7 @@ Result<DownloadOutcome> HttpClient::download_segmented(
             BudgetGuard budget;
 
             std::FILE *file = std::fopen(part.c_str(), "r+b");
+            enlarge_stdio_buffer(file);
             if (!file) {
                 record_error(Error{ErrorKind::Io, errno, "failed to open " + part});
                 return;
