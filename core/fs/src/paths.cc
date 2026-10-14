@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 #include "arc/log.hh"
 
@@ -265,6 +267,90 @@ bool ensureLayout(const Layout &l) {
         }
     }
     return allOk;
+}
+
+namespace {
+
+bool isExistingDirectory(const std::string &path) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    return stdfs::is_directory(stdfs::u8path(path), ec) && !ec;
+}
+
+std::string readWholeFile(const std::string &path) {
+    std::ifstream in(stdfs::u8path(path), std::ios::binary);
+    if (!in) return {};
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    if (in.bad()) return {};
+    return ss.str();
+}
+
+} // namespace
+
+std::string documentsDirFromUserDirs(std::string_view text, std::string_view home) {
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t end = text.find('\n', i);
+        if (end == std::string_view::npos) end = text.size();
+        std::string_view line = text.substr(i, end - i);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        i = end < text.size() ? end + 1 : text.size();
+
+        size_t s = 0;
+        while (s < line.size() && (line[s] == ' ' || line[s] == '\t')) ++s;
+        line.remove_prefix(s);
+        if (line.empty() || line.front() == '#') continue;
+
+        constexpr std::string_view kKey = "XDG_DOCUMENTS_DIR=";
+        if (line.size() < kKey.size() || line.substr(0, kKey.size()) != kKey) continue;
+        std::string_view value = line.substr(kKey.size());
+        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+            value.remove_prefix(1);
+            value.remove_suffix(1);
+        }
+
+        std::string out(value);
+        if (out.compare(0, 7, "${HOME}") == 0) out.replace(0, 7, home);
+        else if (out.compare(0, 5, "$HOME") == 0) out.replace(0, 5, home);
+        if (out.find('$') != std::string::npos) return {};
+        return out;
+    }
+    return {};
+}
+
+std::string userDocuments() {
+#if defined(__ANDROID__)
+    const Layout l = layout("mnrdonw");
+    if (isExistingDirectory(l.documents)) return l.documents;
+    if (isExistingDirectory(l.home)) return l.home;
+    return {};
+#elif defined(_WIN32)
+    const char *profile = std::getenv("USERPROFILE");
+    if (profile == nullptr || profile[0] == '\0') return {};
+    const std::string home(profile);
+    const std::string documents = join(home, "Documents");
+    if (isExistingDirectory(documents)) return documents;
+    if (isExistingDirectory(home)) return home;
+    return {};
+#else
+    const char *homeEnv = std::getenv("HOME");
+    const std::string home = homeEnv == nullptr ? std::string() : std::string(homeEnv);
+    const char *configHome = std::getenv("XDG_CONFIG_HOME");
+    std::string dirsFile;
+    if (configHome != nullptr && configHome[0] != '\0') dirsFile = join(configHome, "user-dirs.dirs");
+    else if (!home.empty()) dirsFile = join(home, ".config/user-dirs.dirs");
+    if (!dirsFile.empty()) {
+        const std::string parsed = documentsDirFromUserDirs(readWholeFile(dirsFile), home);
+        if (isExistingDirectory(parsed)) return parsed;
+    }
+    if (!home.empty()) {
+        const std::string documents = join(home, "Documents");
+        if (isExistingDirectory(documents)) return documents;
+        if (isExistingDirectory(home)) return home;
+    }
+    return {};
+#endif
 }
 
 } // namespace fs

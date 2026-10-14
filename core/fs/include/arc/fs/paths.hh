@@ -151,5 +151,14 @@ std::string relativeTo(std::string_view base, std::string_view path);
 // ---------------------------------------------------------------------------
 std::vector<std::string> ancestorsUpTo(std::string_view dir, std::string_view bound);
 
+// XDG_DOCUMENTS_DIR from a user-dirs.dirs body. Empty when the key is missing
+// or the value expands a variable other than a leading $HOME / ${HOME}.
+// Creates nothing and reads nothing.
+std::string documentsDirFromUserDirs(std::string_view text, std::string_view home);
+
+// An existing Documents directory, or the user home when Documents is absent.
+// Never creates a directory. Empty when no home directory exists.
+std::string userDocuments();
+
 } // namespace fs
 } // namespace arc

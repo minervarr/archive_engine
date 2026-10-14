@@ -210,7 +210,22 @@ static void testPlatformDirsAreStated() {
     assert(platformDirs().privateDir.empty());
 }
 
+static void testDocumentsDirFromUserDirs() {
+    const char* text =
+        "# comment\n"
+        "\n"
+        "XDG_DOWNLOAD_DIR=\"$HOME/Downloads\"\n"
+        "XDG_DOCUMENTS_DIR=\"$HOME/Documents\"\n";
+    assert(documentsDirFromUserDirs(text, "/home/nava") == "/home/nava/Documents");
+    assert(documentsDirFromUserDirs("XDG_DOCUMENTS_DIR=\"${HOME}/Docs\"\n", "/home/nava") ==
+           "/home/nava/Docs");
+    assert(documentsDirFromUserDirs("XDG_MUSIC_DIR=\"$HOME/Music\"\n", "/home/nava").empty());
+    assert(documentsDirFromUserDirs("XDG_DOCUMENTS_DIR=\"$HOME/$OTHER\"\n", "/home/nava").empty());
+    assert(documentsDirFromUserDirs("XDG_DOCUMENTS_DIR=/srv/docs\n", "/home/nava") == "/srv/docs");
+}
+
 int main() {
+    testDocumentsDirFromUserDirs();
     testNormalize();
     testJoin();
     testParentAndFilename();

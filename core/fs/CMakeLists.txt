@@ -11,6 +11,7 @@ add_library(
     STATIC
     src/paths.cc
     src/walk.cc
+    src/list_dir.cc
     src/volume.cc
     src/media_index.cc
 )
@@ -36,7 +37,7 @@ endif()
 # build, but there is no reason to build them in a Release consumer.
 # ---------------------------------------------------------------------------
 if(NOT ANDROID AND CMAKE_BUILD_TYPE STREQUAL "Debug" AND ARC_BUILD_FS_TESTS)
-    foreach(t paths_test walk_test media_index_test)
+    foreach(t paths_test walk_test media_index_test list_test)
         add_executable(arc_${t} tests/${t}.cc)
         target_link_libraries(arc_${t} PRIVATE arc_fs)
         set_target_properties(arc_${t} PROPERTIES OUTPUT_NAME ${t})

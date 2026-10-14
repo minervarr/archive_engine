@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "arc/result.hh"
 
@@ -100,6 +101,11 @@ Result<WalkStats> walk(const std::string &root, const Visitor &visit);
 // scan on the platform where that cost already hurts.
 // ---------------------------------------------------------------------------
 bool statFile(const std::string &path, int64_t &outSize, int64_t &outMtime);
+
+// One directory, non-recursive, no throw. Hidden names, "." and "..", and
+// broken symlinks are omitted. A symlink whose target is a directory is a
+// directory. Order is directories, then regular files, ASCII case-folded.
+Result<std::vector<Entry>> listDir(const std::string &path);
 
 } // namespace fs
 } // namespace arc
