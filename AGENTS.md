@@ -32,8 +32,9 @@ short version that applies to every change.
    are visible, portable, and on Android sit under FUSE; `state`/`cache` are
    private and fast. A database belongs in `state`.
 6. **User directories belong to the user.** Resolve `Music`, `Downloads`,
-   `Pictures`, and `Documents` from `user-dirs.dirs`; never invent English
-   names or create them as a side effect of opening a database.
+   `Pictures`, and `Documents` from `user-dirs.dirs`, falling back to the
+   conventional names when the file is absent; never create them as a side
+   effect of opening a database.
 7. **Errors are values at module boundaries.** Use `arc::Result<T>` /
    `arc::Error`; do not throw across a module API.
 8. **Tests are plain `assert()` binaries.** Debug-only, registered with CTest,

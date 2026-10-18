@@ -191,6 +191,69 @@ std::vector<std::string> ancestorsUpTo(std::string_view dir, std::string_view bo
 // Layout
 // ---------------------------------------------------------------------------
 
+namespace {
+
+bool isExistingDirectory(const std::string &path) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    return stdfs::is_directory(stdfs::u8path(path), ec) && !ec;
+}
+
+std::string readWholeFile(const std::string &path) {
+    std::ifstream in(stdfs::u8path(path), std::ios::binary);
+    if (!in) return {};
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    if (in.bad()) return {};
+    return ss.str();
+}
+
+// XDG_CONFIG_HOME when set, the spec's $HOME/.config default otherwise.
+std::string configHomeFor(const std::string &home) {
+    return envOr("XDG_CONFIG_HOME", join(home, ".config"));
+}
+
+} // namespace
+
+std::string userDirFromUserDirs(std::string_view text, std::string_view key,
+                                std::string_view home) {
+    if (key.empty()) return {};
+
+    std::string prefix(key);
+    prefix += '=';
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t end = text.find('\n', i);
+        if (end == std::string_view::npos) end = text.size();
+        std::string_view line = text.substr(i, end - i);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        i = end < text.size() ? end + 1 : text.size();
+
+        size_t s = 0;
+        while (s < line.size() && (line[s] == ' ' || line[s] == '\t')) ++s;
+        line.remove_prefix(s);
+        if (line.empty() || line.front() == '#') continue;
+
+        if (line.size() < prefix.size() || line.substr(0, prefix.size()) != prefix) continue;
+        std::string_view value = line.substr(prefix.size());
+        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+            value.remove_prefix(1);
+            value.remove_suffix(1);
+        }
+
+        std::string out(value);
+        if (out.compare(0, 7, "${HOME}") == 0) out.replace(0, 7, home);
+        else if (out.compare(0, 5, "$HOME") == 0) out.replace(0, 5, home);
+        if (out.find('$') != std::string::npos) return {};
+        return out;
+    }
+    return {};
+}
+
+std::string documentsDirFromUserDirs(std::string_view text, std::string_view home) {
+    return userDirFromUserDirs(text, "XDG_DOCUMENTS_DIR", home);
+}
+
 Layout layout(std::string_view appName) {
     const std::string app(appName);
     Layout l;
@@ -238,85 +301,60 @@ Layout layout(std::string_view appName) {
     // XDG where the user set it, the XDG defaults otherwise. Not a Linux
     // flourish: it is the layout the Android branch above imitates, which is
     // what lets a path-building expression be written once.
-    l.config = join(envOr("XDG_CONFIG_HOME", join(l.home, ".config")), app);
+    const std::string configHome = configHomeFor(l.home);
+    l.config = join(configHome, app);
     l.data   = join(envOr("XDG_DATA_HOME", join(l.home, ".local/share")), app);
     l.state  = join(envOr("XDG_STATE_HOME", join(l.home, ".local/state")), app);
     l.cache  = join(envOr("XDG_CACHE_HOME", join(l.home, ".cache")), app);
-    l.music     = join(l.home, "Music");
-    l.downloads = join(l.home, "Downloads");
-    l.pictures  = join(l.home, "Pictures");
-    l.documents = join(l.home, "Documents");
+
+    // The user's own directories. xdg-user-dirs writes this file; a machine
+    // that never installed it simply has no file, and the conventional names
+    // are the documented fallback. Read it once, do not shell out.
+    const std::string dirsText = readWholeFile(join(configHome, "user-dirs.dirs"));
+    auto resolvedUserDir = [&](const char *key, const char *fallback) {
+        const std::string configured = userDirFromUserDirs(dirsText, key, l.home);
+        return normalize(configured.empty() ? join(l.home, fallback) : configured);
+    };
+    l.music     = resolvedUserDir("XDG_MUSIC_DIR", "Music");
+    l.downloads = resolvedUserDir("XDG_DOWNLOAD_DIR", "Downloads");
+    l.pictures  = resolvedUserDir("XDG_PICTURES_DIR", "Pictures");
+    l.documents = resolvedUserDir("XDG_DOCUMENTS_DIR", "Documents");
 #endif
 
     return l;
 }
 
-bool ensureLayout(const Layout &l) {
+bool ensureLayout(const Layout &l, LayoutScope scope) {
     bool allOk = true;
+    auto ensure = [&](const std::string &d) {
+        if (d.empty()) return;
+        std::error_code ec;
+        stdfs::create_directories(stdfs::u8path(d), ec);
+        if (ec && !stdfs::exists(stdfs::u8path(d))) {
+            ARC_LOGW("fs: cannot create %s (%s)", d.c_str(), ec.message().c_str());
+            allOk = false;
+        }
+    };
+
     // state and cache first: they are the ones an app cannot run without, and
     // on Android they are the ones that do not need a permission. A failure to
     // create a music directory must not stop the database from opening.
-    for (const std::string *d : {&l.state, &l.cache, &l.config, &l.data, &l.home,
-                                 &l.music, &l.downloads, &l.pictures, &l.documents}) {
-        if (d->empty()) continue;
-        std::error_code ec;
-        stdfs::create_directories(stdfs::u8path(*d), ec);
-        if (ec && !stdfs::exists(stdfs::u8path(*d))) {
-            ARC_LOGW("fs: cannot create %s (%s)", d->c_str(), ec.message().c_str());
-            allOk = false;
-        }
+    ensure(l.state);
+    ensure(l.cache);
+    ensure(l.config);
+    ensure(l.data);
+
+    if (scope == LayoutScope::All) {
+        // Only a caller that explicitly asked for the user's directories gets
+        // them. On desktop these are resolved from user-dirs.dirs and are not
+        // ours to create as a side effect of opening the database.
+        ensure(l.home);
+        ensure(l.music);
+        ensure(l.downloads);
+        ensure(l.pictures);
+        ensure(l.documents);
     }
     return allOk;
-}
-
-namespace {
-
-bool isExistingDirectory(const std::string &path) {
-    if (path.empty()) return false;
-    std::error_code ec;
-    return stdfs::is_directory(stdfs::u8path(path), ec) && !ec;
-}
-
-std::string readWholeFile(const std::string &path) {
-    std::ifstream in(stdfs::u8path(path), std::ios::binary);
-    if (!in) return {};
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    if (in.bad()) return {};
-    return ss.str();
-}
-
-} // namespace
-
-std::string documentsDirFromUserDirs(std::string_view text, std::string_view home) {
-    size_t i = 0;
-    while (i < text.size()) {
-        size_t end = text.find('\n', i);
-        if (end == std::string_view::npos) end = text.size();
-        std::string_view line = text.substr(i, end - i);
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-        i = end < text.size() ? end + 1 : text.size();
-
-        size_t s = 0;
-        while (s < line.size() && (line[s] == ' ' || line[s] == '\t')) ++s;
-        line.remove_prefix(s);
-        if (line.empty() || line.front() == '#') continue;
-
-        constexpr std::string_view kKey = "XDG_DOCUMENTS_DIR=";
-        if (line.size() < kKey.size() || line.substr(0, kKey.size()) != kKey) continue;
-        std::string_view value = line.substr(kKey.size());
-        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-            value.remove_prefix(1);
-            value.remove_suffix(1);
-        }
-
-        std::string out(value);
-        if (out.compare(0, 7, "${HOME}") == 0) out.replace(0, 7, home);
-        else if (out.compare(0, 5, "$HOME") == 0) out.replace(0, 5, home);
-        if (out.find('$') != std::string::npos) return {};
-        return out;
-    }
-    return {};
 }
 
 std::string userDocuments() {
@@ -336,15 +374,10 @@ std::string userDocuments() {
 #else
     const char *homeEnv = std::getenv("HOME");
     const std::string home = homeEnv == nullptr ? std::string() : std::string(homeEnv);
-    const char *configHome = std::getenv("XDG_CONFIG_HOME");
-    std::string dirsFile;
-    if (configHome != nullptr && configHome[0] != '\0') dirsFile = join(configHome, "user-dirs.dirs");
-    else if (!home.empty()) dirsFile = join(home, ".config/user-dirs.dirs");
-    if (!dirsFile.empty()) {
+    if (!home.empty()) {
+        const std::string dirsFile = join(configHomeFor(home), "user-dirs.dirs");
         const std::string parsed = documentsDirFromUserDirs(readWholeFile(dirsFile), home);
         if (isExistingDirectory(parsed)) return parsed;
-    }
-    if (!home.empty()) {
         const std::string documents = join(home, "Documents");
         if (isExistingDirectory(documents)) return documents;
         if (isExistingDirectory(home)) return home;

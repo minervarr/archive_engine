@@ -1,16 +1,38 @@
-// arc_fs: path arithmetic and layout resolution.
+// arc_fs: path arithmetic, layout resolution, and directory ownership.
 //
-// Everything here is pure — nothing is opened, created or stat'ed — which is
-// what lets the answers be asserted exactly rather than described.
+// The path arithmetic is pure — nothing is opened, created or stat'ed — which
+// is what lets those answers be asserted exactly. Layout resolution reads the
+// one small user-dirs.dirs file, and the scope tests create an isolated scratch
+// tree; both are still ordinary Debug-only assert() checks.
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "arc/fs/paths.hh"
 
 using namespace arc::fs;
+namespace stdfs = std::filesystem;
+
+namespace {
+
+// A clean scratch tree under the system temp directory. Each test that needs
+// the filesystem gets its own, so a failed assertion in one does not leave a
+// half-built layout for the next.
+stdfs::path freshScratch(const char *name) {
+    const stdfs::path root = stdfs::temp_directory_path() / name;
+    std::error_code ec;
+    stdfs::remove_all(root, ec);
+    ec.clear();
+    stdfs::create_directories(root, ec);
+    assert(!ec);
+    return root;
+}
+
+} // namespace
 
 static void testNormalize() {
     assert(normalize("/a/b") == "/a/b");
@@ -153,30 +175,34 @@ static void testAncestorsUpTo() {
 // layout(): the split that the whole module exists to enforce.
 // ---------------------------------------------------------------------------
 static void testLayout() {
-    setenv("HOME", "/home/tester", 1);
-    // Unset any XDG override the developer's own shell might have, so the test
-    // asserts the DEFAULTS rather than this machine's configuration.
-    unsetenv("XDG_CONFIG_HOME");
-    unsetenv("XDG_DATA_HOME");
-    unsetenv("XDG_STATE_HOME");
-    unsetenv("XDG_CACHE_HOME");
+    const stdfs::path root = freshScratch("arc_fs_paths_layout");
+    const std::string home = (root / "home").string();
+    const std::string config = (root / "config").string();
+    const std::string state = (root / "state").string();
+    const std::string data = (root / "data").string();
+    const std::string cache = (root / "cache").string();
+
+    setenv("HOME", home.c_str(), 1);
+    setenv("XDG_CONFIG_HOME", config.c_str(), 1);
+    setenv("XDG_STATE_HOME", state.c_str(), 1);
+    setenv("XDG_DATA_HOME", data.c_str(), 1);
+    setenv("XDG_CACHE_HOME", cache.c_str(), 1);
 
     Layout l = layout("matrix_player");
 
 #if !defined(_WIN32) && !defined(__ANDROID__)
-    assert(l.home == "/home/tester");
-    assert(l.config == "/home/tester/.config/matrix_player");
-    assert(l.data == "/home/tester/.local/share/matrix_player");
-    assert(l.state == "/home/tester/.local/state/matrix_player");
-    assert(l.cache == "/home/tester/.cache/matrix_player");
-    assert(l.music == "/home/tester/Music");
-    assert(l.downloads == "/home/tester/Downloads");
+    assert(l.home == home);
+    assert(l.config == join(config, "matrix_player"));
+    assert(l.data == join(data, "matrix_player"));
+    assert(l.state == join(state, "matrix_player"));
+    assert(l.cache == join(cache, "matrix_player"));
 
-    // XDG is honoured when the user set it.
-    setenv("XDG_STATE_HOME", "/run/user/1000/state", 1);
-    Layout x = layout("matrix_player");
-    assert(x.state == "/run/user/1000/state/matrix_player");
-    unsetenv("XDG_STATE_HOME");
+    // No user-dirs.dirs in this fresh scratch config: the conventional names
+    // are the documented fallback, not an assertion that those dirs exist.
+    assert(l.music == join(home, "Music"));
+    assert(l.downloads == join(home, "Downloads"));
+    assert(l.pictures == join(home, "Pictures"));
+    assert(l.documents == join(home, "Documents"));
 #endif
 
     // Whatever the platform, every field is populated and normalized — no
@@ -193,6 +219,83 @@ static void testLayout() {
     // actually be run.
     assert(!l.state.empty());
     assert(!l.cache.empty());
+
+    stdfs::remove_all(root);
+}
+
+// The XDG file is the source of truth when it exists: a user who moved their
+// directories to /srv or $HOME/webdl must not get the English defaults back.
+static void testLayoutUsesUserDirs() {
+#if !defined(_WIN32) && !defined(__ANDROID__)
+    const stdfs::path root = freshScratch("arc_fs_paths_user_dirs");
+    const std::string home = (root / "home").string();
+    const std::string config = (root / "config").string();
+    stdfs::create_directories(config);
+
+    {
+        std::ofstream out(stdfs::u8path((stdfs::path(config) / "user-dirs.dirs").string()),
+                          std::ios::binary);
+        assert(out);
+        out << "# written by xdg-user-dirs-update\n"
+               "\n"
+               "XDG_DOWNLOAD_DIR=\"$HOME/webdl\"\n"
+               "XDG_DOCUMENTS_DIR=\"${HOME}/docs\"\n"
+               "XDG_MUSIC_DIR=\"/srv/music\"\n"
+               "XDG_PICTURES_DIR=\"$HOME/$OTHER\"\n";
+        assert(out.good());
+    }
+
+    setenv("HOME", home.c_str(), 1);
+    setenv("XDG_CONFIG_HOME", config.c_str(), 1);
+    unsetenv("XDG_DATA_HOME");
+    unsetenv("XDG_STATE_HOME");
+    unsetenv("XDG_CACHE_HOME");
+
+    const Layout l = layout("klend_ario");
+    assert(l.home == home);
+    assert(l.downloads == join(home, "webdl"));
+    assert(l.documents == join(home, "docs"));
+    assert(l.music == "/srv/music");
+    // The value still contains an unexpanded variable: refuse it rather than
+    // hand back a path that means nothing, and fall back to the default.
+    assert(l.pictures == join(home, "Pictures"));
+
+    stdfs::remove_all(root);
+#endif
+}
+
+// App scope creates only what the app owns. All scope keeps the historical
+// behavior for consumers that explicitly want the user's directories.
+static void testEnsureLayoutScopes() {
+    const stdfs::path root = freshScratch("arc_fs_paths_ensure");
+    Layout l;
+    l.home = join(root.string(), "home");
+    l.config = join(l.home, ".config/klend_ario");
+    l.data = join(l.home, ".local/share/klend_ario");
+    l.state = join(root.string(), "state/klend_ario");
+    l.cache = join(root.string(), "cache/klend_ario");
+    l.music = join(l.home, "Music");
+    l.downloads = join(l.home, "Downloads");
+    l.pictures = join(l.home, "Pictures");
+    l.documents = join(l.home, "Documents");
+
+    assert(ensureLayout(l, LayoutScope::App));
+    assert(stdfs::is_directory(stdfs::u8path(l.state)));
+    assert(stdfs::is_directory(stdfs::u8path(l.cache)));
+    assert(stdfs::is_directory(stdfs::u8path(l.config)));
+    assert(stdfs::is_directory(stdfs::u8path(l.data)));
+    assert(!stdfs::exists(stdfs::u8path(l.music)));
+    assert(!stdfs::exists(stdfs::u8path(l.downloads)));
+    assert(!stdfs::exists(stdfs::u8path(l.pictures)));
+    assert(!stdfs::exists(stdfs::u8path(l.documents)));
+
+    assert(ensureLayout(l, LayoutScope::All));
+    assert(stdfs::is_directory(stdfs::u8path(l.music)));
+    assert(stdfs::is_directory(stdfs::u8path(l.downloads)));
+    assert(stdfs::is_directory(stdfs::u8path(l.pictures)));
+    assert(stdfs::is_directory(stdfs::u8path(l.documents)));
+
+    stdfs::remove_all(root);
 }
 
 // The Android layout is pure string arithmetic, so the interesting half of it
@@ -222,6 +325,12 @@ static void testDocumentsDirFromUserDirs() {
     assert(documentsDirFromUserDirs("XDG_MUSIC_DIR=\"$HOME/Music\"\n", "/home/nava").empty());
     assert(documentsDirFromUserDirs("XDG_DOCUMENTS_DIR=\"$HOME/$OTHER\"\n", "/home/nava").empty());
     assert(documentsDirFromUserDirs("XDG_DOCUMENTS_DIR=/srv/docs\n", "/home/nava") == "/srv/docs");
+
+    // The same parser serves every XDG_*_DIR key, not just Documents.
+    assert(userDirFromUserDirs(text, "XDG_DOWNLOAD_DIR", "/home/nava") ==
+           "/home/nava/Downloads");
+    assert(userDirFromUserDirs(text, "XDG_MUSIC_DIR", "/home/nava").empty());
+    assert(userDirFromUserDirs(text, "", "/home/nava").empty());
 }
 
 int main() {
@@ -233,6 +342,8 @@ int main() {
     testRelativeTo();
     testAncestorsUpTo();
     testLayout();
+    testLayoutUsesUserDirs();
+    testEnsureLayoutScopes();
     testPlatformDirsAreStated();
     std::printf("paths_test: all assertions passed\n");
     return 0;

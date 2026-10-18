@@ -91,6 +91,21 @@ needing to know the platform. It is visible in a file manager on purpose:
 everything under it belongs to the user, survives uninstall, and can be copied
 to another device.
 
+### User directories are read, not created
+
+On Linux `layout()` resolves `music`, `downloads`, `pictures`, and `documents`
+from `$XDG_CONFIG_HOME/user-dirs.dirs` (normally
+`~/.config/user-dirs.dirs`), with `$HOME/Music`, `$HOME/Downloads`,
+`$HOME/Pictures`, and `$HOME/Documents` as the fallback when the file or a key
+is absent. That is also the fallback on a machine where `xdg-user-dirs` was
+never installed; the library never shells out to `xdg-user-dir`.
+
+`ensureLayout(l, LayoutScope::App)` creates only `state`, `cache`, `config`, and
+`data`. The user's directories are created only by an explicit
+`LayoutScope::All`, because they are the user's filing, not the app's state.
+Opening a database must never leave empty `Music`/`Downloads`/`Pictures`/
+`Documents` folders in `$HOME`.
+
 ### `ancestorsUpTo()`
 
 The nearest-first ancestor chain up to a bound and one past it, refusing to

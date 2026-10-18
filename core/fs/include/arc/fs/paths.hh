@@ -46,7 +46,11 @@ struct Layout {
     std::string state;    // databases, indexes — written constantly
     std::string cache;    // regenerable; safe for anything to delete
 
-    // Well-known user directories, for defaults and first-run seeding.
+    // The user's well-known directories, for defaults and first-run seeding.
+    // On Linux they are resolved from user-dirs.dirs (XDG_MUSIC_DIR,
+    // XDG_DOWNLOAD_DIR, XDG_PICTURES_DIR, XDG_DOCUMENTS_DIR) with the
+    // conventional English names as the fallback. They are the USER's
+    // directories, not the app's: ensureLayout(App) never creates them.
     std::string music;
     std::string downloads;
     std::string pictures;
@@ -88,14 +92,31 @@ const PlatformDirs &platformDirs();
 // Resolves the layout for one application. `appName` is the directory-safe
 // short name ("matrix_player", "streamer") used for the per-app subdirectories.
 //
-// PURE with respect to the filesystem: it computes strings and creates nothing.
-// Use ensureLayout() when the directories must actually exist.
+// Creates nothing. On Linux it reads $XDG_CONFIG_HOME/user-dirs.dirs (or
+// $HOME/.config/user-dirs.dirs) once to resolve the user's well-known
+// directories; a missing file or key falls back to $HOME/Music,
+// $HOME/Downloads, $HOME/Pictures, and $HOME/Documents. Reading that one small
+// file is how the layout follows a user who moved those directories, without
+// taking a dependency on the xdg-user-dirs binary.
 Layout layout(std::string_view appName);
 
-// Creates every directory in `l` that does not exist yet. Returns false if any
-// could not be created, having still attempted the rest — a missing cache
-// directory should not stop an app whose state directory is fine.
-bool ensureLayout(const Layout &l);
+// What ensureLayout() is allowed to create.
+//
+// App is the safe scope for a frontend: state/cache and the app's own config
+// and data. All additionally creates the well-known user directories. On
+// desktop those are the USER's directories and may be on a different volume,
+// so creating them as a side effect of opening the database is wrong.
+enum class LayoutScope {
+    App,
+    All,
+};
+
+// Creates every directory in `l` that the scope owns and that does not exist
+// yet. Returns false if any could not be created, having still attempted the
+// rest — a missing cache directory should not stop an app whose state directory
+// is fine. The default keeps the historical behavior; frontends that own only
+// their own files should pass LayoutScope::App.
+bool ensureLayout(const Layout &l, LayoutScope scope = LayoutScope::All);
 
 // ---------------------------------------------------------------------------
 // Pure path arithmetic. No I/O, nothing is opened or stat'ed, so these are
@@ -150,6 +171,13 @@ std::string relativeTo(std::string_view base, std::string_view path);
 // An empty `bound` means "no bound": just `dir`.
 // ---------------------------------------------------------------------------
 std::vector<std::string> ancestorsUpTo(std::string_view dir, std::string_view bound);
+
+// One XDG_*_DIR value from a user-dirs.dirs body. `key` is the full key name
+// ("XDG_DOWNLOAD_DIR"). Empty when the key is missing or the value expands a
+// variable other than a leading $HOME / ${HOME}. Creates nothing and reads
+// nothing.
+std::string userDirFromUserDirs(std::string_view text, std::string_view key,
+                                std::string_view home);
 
 // XDG_DOCUMENTS_DIR from a user-dirs.dirs body. Empty when the key is missing
 // or the value expands a variable other than a leading $HOME / ${HOME}.
