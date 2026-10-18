@@ -32,12 +32,14 @@ cmake -S core -B build_test -G Ninja -DCMAKE_BUILD_TYPE=Debug \
       -DARC_BUILD_ARCHIVE=OFF -DARC_BUILD_NET=OFF -DARC_BUILD_TAG=OFF \
       -DARC_BUILD_FS_TESTS=ON
 cmake --build build_test
-ctest --test-dir build_test --output-on-failure
+./build_test/fs/paths_test
+./build_test/fs/walk_test
+./build_test/fs/media_index_test
+./build_test/fs/list_test
 ```
 
-Tests are plain `assert()` binaries, Debug-only, matching the workspace
-convention. The standalone build is a compile check, not how consumers link the
-library.
+Tests are plain `assert()` binaries, Debug-only, run directly. The standalone
+build is a compile check, not how consumers link the library.
 
 ## License
 

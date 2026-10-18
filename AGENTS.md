@@ -20,9 +20,10 @@ short version that applies to every change.
 1. **Namespace `arc::`, targets `arc_*`.** Never reintroduce `ae::`/`ae_*`;
    those belong to `audio_engine`, and two `ae::Result` definitions are a silent
    ODR violation. `AE_IFDIR`/`AE_IFREG` are libarchive's names and stay.
-2. **`core/` does no platform work.** No OS SDK includes, no JNI, no
-   `#ifdef _WIN32` around UI code. Android facts are pushed in from the platform
-   layer through `setPlatformDirs()` and `setMediaIndexBackend()`.
+2. **`core/` has no JNI and no frontend knowledge.** Android facts are pushed
+   in from the platform layer through `setPlatformDirs()` and
+   `setMediaIndexBackend()`. The one desktop platform branch is path resolution
+   in `arc_fs`; do not grow a new SDK dependency around it.
 3. **Modules stay independently switchable.** Do not make `arc_fs` require
    libarchive, or `arc_util` require curl. A consumer builds only what it uses.
 4. **Directory walks cannot throw.** `walk()` and `listDir()` exist because the
@@ -37,8 +38,9 @@ short version that applies to every change.
    effect of opening a database.
 7. **Errors are values at module boundaries.** Use `arc::Result<T>` /
    `arc::Error`; do not throw across a module API.
-8. **Tests are plain `assert()` binaries.** Debug-only, registered with CTest,
-   and a behavior change needs a test that would fail without it.
+8. **Tests are plain `assert()` binaries.** Debug-only; run them directly.
+   Consumers that want them under CTest register them in their own build. A
+   behavior change needs a test that would fail without it.
 9. **Commit and push with [`./git_wrapper`](git_wrapper).** It forces the
    `nava` identity, strips `Co-Authored-By`/generated trailers, and pushes
    submodules before their parent. Shared changes land here first.
@@ -50,11 +52,16 @@ cmake -S core -B build_test -G Ninja -DCMAKE_BUILD_TYPE=Debug \
       -DARC_BUILD_ARCHIVE=OFF -DARC_BUILD_NET=OFF -DARC_BUILD_TAG=OFF \
       -DARC_BUILD_FS_TESTS=ON
 cmake --build build_test
-ctest --test-dir build_test --output-on-failure
+./build_test/fs/paths_test
+./build_test/fs/walk_test
+./build_test/fs/media_index_test
+./build_test/fs/list_test
 ```
 
 `core/archive` is ON by default only for consumers that want it; the standalone
-smoke build above turns it off so no configure reaches the network.
+smoke build above turns it off so no configure reaches the network. The test
+binaries are not registered with CTest here; they are run directly, as the
+consumer repos do for their own assert suites.
 
 ## Consumers
 
